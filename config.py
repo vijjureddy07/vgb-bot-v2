@@ -1,0 +1,147 @@
+"""
+VGB Delta Bot v2 — Configuration (Binance Testnet)
+=====================================================
+Session-adaptive Gaussian trading system.
+Execution: Binance USDT-M Futures Testnet
+"""
+
+# ============================================================
+# EXCHANGE — BINANCE FUTURES
+# ============================================================
+EXCHANGE = 'binance'
+BINANCE_TESTNET_URL = "https://testnet.binancefuture.com"
+BINANCE_LIVE_URL = "https://fapi.binance.com"
+BINANCE_API_KEY = ""        # Fill in
+BINANCE_API_SECRET = ""     # Fill in
+USE_TESTNET = True
+SYMBOL = "BTCUSDT"
+CANDLE_SOURCE = 'binance'
+
+# ============================================================
+# STRATEGY
+# ============================================================
+GAUSSIAN_LENGTH = 23
+GAUSSIAN_DISTANCE = 1
+MOMENTUM_THRESHOLD_PCT = 0.05
+
+# ============================================================
+# SESSIONS (IST)
+# ============================================================
+SESSIONS = {
+    'ASIA': {
+        'enabled': True,
+        'start_hour': 5, 'start_min': 30,
+        'end_hour': 13, 'end_min': 30,
+        'mode': 'HTF_BIAS_MOM',
+        'htf_timeframe': '3m',
+        'entry_timeframe': '1m',
+        'capital_pct': 0.25,
+        'leverage': 25,
+    },
+    'LONDON': {
+        'enabled': True,
+        'start_hour': 13, 'start_min': 30,
+        'end_hour': 19, 'end_min': 0,
+        'mode': 'HTF_ONLY',
+        'htf_timeframe': '15m',
+        'entry_timeframe': '15m',
+        'capital_pct': 0.25,
+        'leverage': 25,
+    },
+    'NY': {
+        'enabled': True,
+        'start_hour': 19, 'start_min': 0,
+        'end_hour': 2, 'end_min': 0,
+        'monday_start_hour': 19, 'monday_start_min': 45,
+        'friday_end_hour': 23, 'friday_end_min': 30,
+        'mode': 'HTF_ONLY',
+        'htf_timeframe': '5m',
+        'entry_timeframe': '5m',
+        'capital_pct': 0.25,
+        'leverage': 25,
+    },
+}
+TRADING_DAYS = [0, 1, 2, 3, 4]
+NO_TRADE_DAYS = [5, 6]
+
+# ============================================================
+# RISK
+# ============================================================
+SAFETY_SL_ENABLED = True
+SAFETY_SL_PCT = 3.0
+DEFAULT_CAPITAL_PCT = 0.25
+DEFAULT_LEVERAGE = 25
+MAX_NOTIONAL_USDT = 500_000
+
+# ============================================================
+# NEWS FILTER
+# ============================================================
+NEWS_FILTER_ENABLED = True
+NEWS_BLOCK_MINUTES = 15
+NEWS_CALENDAR_URL = "https://api.faireconomy.media/economic_calendar"
+NEWS_CACHE_SECONDS = 3600
+NEWS_HIGH_IMPACT = [
+    'CPI', 'Consumer Price Index',
+    'FOMC', 'Federal Funds Rate', 'Interest Rate Decision',
+    'Non-Farm', 'NFP', 'Nonfarm Payrolls',
+    'Fed Chair', 'Powell',
+    'GDP', 'PPI', 'Unemployment Rate', 'Retail Sales',
+]
+
+# ============================================================
+# SELF-REPAIR
+# ============================================================
+MAX_CONSECUTIVE_FAILURES = 5
+SAFE_MODE_WAIT_SECONDS = 300
+SAFE_MODE_MAX_RETRIES = 3
+RECOVER_POSITION_ON_STARTUP = True
+DAILY_RESTART_ENABLED = True
+DAILY_RESTART_HOUR = 2
+DAILY_RESTART_MINUTE = 30
+MAX_CANDLE_AGE_SECONDS = 300
+HEARTBEAT_INTERVAL = 300
+HEARTBEAT_TELEGRAM_INTERVAL = 3600
+
+# ============================================================
+# CANDLE FETCH
+# ============================================================
+M1_CANDLE_BUFFER = 100
+M3_CANDLE_BUFFER = 100
+M5_CANDLE_BUFFER = 100
+M15_CANDLE_BUFFER = 50
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+TELEGRAM_ENABLED = True
+TELEGRAM_BOT_TOKEN = ""
+TELEGRAM_CHAT_ID = ""
+ALERT_ON_ENTRY = True
+ALERT_ON_EXIT = True
+ALERT_ON_BIAS_CHANGE = True
+ALERT_ON_SESSION_CHANGE = True
+ALERT_ON_ERROR = True
+ALERT_ON_SL_HIT = True
+ALERT_ON_NEWS_BLOCK = True
+ALERT_ON_SELF_REPAIR = True
+
+# ============================================================
+# LOGGING
+# ============================================================
+LOG_FILE = "vgb_bot.log"
+LOG_LEVEL = "INFO"
+LOG_TRADES_TO_CSV = True
+TRADE_LOG_FILE = "trade_log.csv"
+
+# ============================================================
+# EXECUTION
+# ============================================================
+ORDER_TYPE = 'market'
+MAX_ORDER_RETRIES = 3
+RETRY_DELAY_SECONDS = 2
+CLOSE_AT_SESSION_END = True
+ALLOW_RE_ENTRY = True
+
+FEES = {
+    'binance': {'taker': 0.0004, 'maker': 0.0002, 'gst': 0.0}
+}

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.log
+trade_log.csv
+venv/
+.DS_Store
+.vscode/
