@@ -28,6 +28,9 @@ from telegram_alerts import (
 )
 from news_filter import news_filter
 from watchdog import Watchdog, recover_position_state, perform_daily_restart
+from kill_switch import check_kill_switch, check_pause_switch, execute_emergency_shutdown
+from balance_monitor import BalanceMonitor
+from weekly_report import generate_weekly_report, generate_health_report
 
 
 def log(msg, level='INFO'):
@@ -81,6 +84,8 @@ def main():
     daily_wins = 0
     daily_losses = 0
     last_daily_reset = get_ist_now().date()
+    last_weekly_report = get_ist_now().isocalendar()[1]  # week number
+    balance_monitor = None  # initialized after getting balance
 
     # Verify exchange connection
     server_time = get_server_time()
@@ -104,6 +109,9 @@ def main():
 
     log(f"Balance: ${balance:.2f} USDT")
 
+    # Initialize balance monitor
+    balance_monitor = BalanceMonitor(balance)
+
     # Recover position state
     recovered_pos = recover_position_state()
     if recovered_pos:
@@ -125,6 +133,56 @@ def main():
     while True:
         try:
             now_ist = get_ist_now()
+
+            # --- KILL SWITCH CHECK (highest priority) ---
+            if check_kill_switch():
+                log("KILL SWITCH ACTIVATED", 'CRITICAL')
+                execute_emergency_shutdown()
+
+            # --- PAUSE CHECK ---
+            if check_pause_switch():
+                if watchdog.should_heartbeat():
+                    log("PAUSED — no new trades (file: PAUSE exists)")
+                _time.sleep(30)
+                continue
+
+            # --- Weekly report (every Sunday) ---
+            current_week = now_ist.isocalendar()[1]
+            if current_week != last_weekly_report and now_ist.weekday() == 6:  # Sunday
+                log("Generating weekly report...")
+                report, formatted = generate_weekly_report()
+                send_message(formatted)
+                health = generate_health_report()
+                send_message(health)
+                last_weekly_report = current_week
+                log("Weekly report sent")
+
+            # --- Balance monitor update ---
+            if balance_monitor:
+                has_pos = current_position is not None
+                fresh_balance = get_balance()
+                if fresh_balance is not None:
+                    _, event_type, event_amount = balance_monitor.update(fresh_balance, has_pos)
+                    if event_type == 'WITHDRAWAL':
+                        log(f"WITHDRAWAL DETECTED: ${event_amount:.2f} — balance now ${fresh_balance:.2f}")
+                        send_message(f"💸 Withdrawal detected: ${event_amount:.2f}\nNew balance: ${fresh_balance:.2f}")
+                        balance = fresh_balance
+                    elif event_type == 'DEPOSIT':
+                        log(f"DEPOSIT DETECTED: ${event_amount:.2f} — balance now ${fresh_balance:.2f}")
+                        send_message(f"💰 Deposit detected: +${event_amount:.2f}\nNew balance: ${fresh_balance:.2f}")
+                        balance = fresh_balance
+
+                    # Safety check
+                    safe, reason = balance_monitor.is_safe_to_trade(fresh_balance)
+                    if not safe:
+                        log(f"UNSAFE BALANCE: {reason}", 'WARNING')
+                        send_message(f"⚠️ {reason}")
+                        if current_position:
+                            cancel_all_orders()
+                            close_position()
+                            current_position = None
+                        _time.sleep(60)
+                        continue
 
             # --- Daily reset ---
             if now_ist.date() != last_daily_reset:
