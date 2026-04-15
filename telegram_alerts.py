@@ -1,7 +1,5 @@
 """
-VGB Delta Bot v2 — Telegram Alerts
-=====================================
-Sends trading alerts and status updates via Telegram.
+VGB Delta Bot v2.2 — Telegram Alerts (USD only)
 """
 
 import requests
@@ -10,130 +8,111 @@ import config
 
 
 def send_message(text):
-    """Send a message to Telegram."""
     if not config.TELEGRAM_ENABLED or not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         return
-
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': config.TELEGRAM_CHAT_ID,
-        'text': text,
-        'parse_mode': 'HTML'
-    }
-
     try:
-        r = requests.post(url, json=payload, timeout=10)
-        if not r.ok:
-            print(f"[TG] Failed to send: {r.text[:100]}")
-    except Exception as e:
-        print(f"[TG] Error: {e}")
+        r = requests.post(url, json={
+            'chat_id': config.TELEGRAM_CHAT_ID,
+            'text': text, 'parse_mode': 'HTML'
+        }, timeout=10)
+    except:
+        pass
 
 
 def alert_entry(side, price, size, session, mode, leverage, capital):
-    """Alert on trade entry."""
-    if not config.ALERT_ON_ENTRY:
-        return
+    if not config.ALERT_ON_ENTRY: return
     emoji = "🟢" if side == "BUY" else "🔴"
-    text = (
+    send_message(
         f"{emoji} <b>NEW {side}</b>\n"
         f"Price: ${price:,.1f}\n"
-        f"Size: {size} contracts\n"
+        f"Size: {size} BTC\n"
         f"Session: {session} | Mode: {mode}\n"
         f"Leverage: {leverage}x\n"
-        f"Capital: ₹{capital:,.0f}\n"
+        f"Capital: ${capital:,.2f}\n"
         f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
     )
-    send_message(text)
 
 
 def alert_exit(side, entry_price, exit_price, pnl, reason, capital):
-    """Alert on trade exit."""
-    if not config.ALERT_ON_EXIT:
-        return
+    if not config.ALERT_ON_EXIT: return
     emoji = "✅" if pnl >= 0 else "❌"
-    pnl_str = f"+₹{pnl:,.2f}" if pnl >= 0 else f"-₹{abs(pnl):,.2f}"
-    pct = ((exit_price - entry_price) / entry_price * 100) if side == 'BUY' else ((entry_price - exit_price) / entry_price * 100)
-    text = (
+    pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+    if side == 'BUY':
+        pct = (exit_price - entry_price) / entry_price * 100
+    else:
+        pct = (entry_price - exit_price) / entry_price * 100
+    send_message(
         f"{emoji} <b>CLOSED {side}</b>\n"
         f"Entry: ${entry_price:,.1f} → Exit: ${exit_price:,.1f}\n"
         f"Move: {pct:+.3f}%\n"
         f"PnL: {pnl_str}\n"
         f"Reason: {reason}\n"
-        f"Capital: ₹{capital:,.0f}\n"
+        f"Capital: ${capital:,.2f}\n"
         f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
     )
-    send_message(text)
 
 
 def alert_bias_change(htf_timeframe, new_bias, price):
-    """Alert on HTF bias change."""
-    if not config.ALERT_ON_BIAS_CHANGE:
-        return
+    if not config.ALERT_ON_BIAS_CHANGE: return
     emoji = "📈" if new_bias == "BUY" else "📉"
-    text = (
+    send_message(
         f"{emoji} <b>BIAS FLIP: {htf_timeframe} → {new_bias}</b>\n"
         f"Price: ${price:,.1f}\n"
         f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
     )
-    send_message(text)
 
 
 def alert_session_change(session_name, action):
-    """Alert on session open/close."""
-    if not config.ALERT_ON_SESSION_CHANGE:
-        return
+    if not config.ALERT_ON_SESSION_CHANGE: return
     emoji = "🔔" if action == "OPEN" else "🔕"
-    text = (
-        f"{emoji} <b>Session {action}: {session_name}</b>\n"
-        f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
-    )
-    send_message(text)
+    send_message(f"{emoji} <b>Session {action}: {session_name}</b>\nTime: {datetime.now().strftime('%H:%M:%S')} IST")
 
 
 def alert_error(error_msg):
-    """Alert on critical error."""
-    if not config.ALERT_ON_ERROR:
-        return
-    text = f"⚠️ <b>BOT ERROR</b>\n{error_msg}\nTime: {datetime.now().strftime('%H:%M:%S')} IST"
-    send_message(text)
+    if not config.ALERT_ON_ERROR: return
+    send_message(f"⚠️ <b>BOT ERROR</b>\n{error_msg}\nTime: {datetime.now().strftime('%H:%M:%S')} IST")
 
 
 def alert_safety_sl_hit(side, entry_price, sl_price, capital):
-    """Alert when safety SL is hit."""
-    if not config.ALERT_ON_SL_HIT:
-        return
-    text = (
+    if not config.ALERT_ON_SL_HIT: return
+    send_message(
         f"🚨 <b>SAFETY SL HIT</b>\n"
         f"{side} from ${entry_price:,.1f} stopped at ${sl_price:,.1f}\n"
-        f"Capital: ₹{capital:,.0f}\n"
+        f"Capital: ${capital:,.2f}\n"
         f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
     )
-    send_message(text)
+
+
+def alert_breakeven(side, entry_price, current_price):
+    """Alert when SL moved to breakeven."""
+    send_message(
+        f"🔒 <b>BREAKEVEN SET</b>\n"
+        f"{side} from ${entry_price:,.1f} | Now ${current_price:,.1f}\n"
+        f"SL moved to entry — risk free trade\n"
+        f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
+    )
 
 
 def alert_daily_summary(trades_today, pnl_today, capital, wins, losses):
-    """Send daily summary."""
-    emoji = "📊"
-    pnl_str = f"+₹{pnl_today:,.2f}" if pnl_today >= 0 else f"-₹{abs(pnl_today):,.2f}"
-    text = (
-        f"{emoji} <b>DAILY SUMMARY</b>\n"
+    pnl_str = f"+${pnl_today:,.2f}" if pnl_today >= 0 else f"-${abs(pnl_today):,.2f}"
+    send_message(
+        f"📊 <b>DAILY SUMMARY</b>\n"
         f"Trades: {trades_today} (W:{wins} L:{losses})\n"
         f"PnL: {pnl_str}\n"
-        f"Capital: ₹{capital:,.0f}\n"
+        f"Capital: ${capital:,.2f}\n"
         f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
     )
-    send_message(text)
 
 
 def alert_startup(capital):
-    """Alert on bot startup."""
-    text = (
-        f"🤖 <b>VGB Bot v2 Started</b>\n"
-        f"Capital: ₹{capital:,.0f}\n"
+    send_message(
+        f"🤖 <b>VGB Bot v2.2 Started</b>\n"
+        f"Capital: ${capital:,.2f}\n"
         f"Exchange: {'Testnet' if config.USE_TESTNET else 'LIVE'}\n"
-        f"Sessions: Asia({config.SESSIONS['ASIA']['mode']}) | "
-        f"London({config.SESSIONS['LONDON']['mode']}) | "
-        f"NY({config.SESSIONS['NY']['mode']})\n"
+        f"Asia: {config.SESSIONS['ASIA']['htf_timeframe']}→{config.SESSIONS['ASIA']['entry_timeframe']} | "
+        f"London: {config.SESSIONS['LONDON']['htf_timeframe']} | "
+        f"NY: {config.SESSIONS['NY']['htf_timeframe']}\n"
+        f"Breakeven: {'ON at +' + str(config.BREAKEVEN_TRIGGER_PCT) + '%' if config.BREAKEVEN_ENABLED else 'OFF'}\n"
         f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
     )
-    send_message(text)
