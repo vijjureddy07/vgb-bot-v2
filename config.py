@@ -24,9 +24,10 @@ CANDLE_SOURCE = 'binance'
 # ============================================================
 # STRATEGY
 # ============================================================
-GAUSSIAN_LENGTH = 23
+GAUSSIAN_LENGTH = 20    # Pine Script default (was 23 incorrectly)
 GAUSSIAN_DISTANCE = 1
-MOMENTUM_THRESHOLD_PCT = 0.04  # lowered from 0.05 for Asia
+GAUSSIAN_MODE = 'AVG'  # 'AVG', 'MEDIAN', or 'MODE'
+MOMENTUM_THRESHOLD_PCT = 0.04
 
 # ============================================================
 # SESSIONS (IST) — UPDATED TIMEFRAMES
@@ -115,10 +116,10 @@ HEARTBEAT_TELEGRAM_INTERVAL = 3600
 # ============================================================
 # CANDLE FETCH
 # ============================================================
-M1_CANDLE_BUFFER = 100
-M3_CANDLE_BUFFER = 100
-M5_CANDLE_BUFFER = 100
-M15_CANDLE_BUFFER = 50
+M1_CANDLE_BUFFER = 200    # needs 100 for SMA + 40 for filters
+M3_CANDLE_BUFFER = 200
+M5_CANDLE_BUFFER = 200
+M15_CANDLE_BUFFER = 150
 
 # ============================================================
 # TELEGRAM

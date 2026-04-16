@@ -150,10 +150,10 @@ def main():
     watchdog = Watchdog()
 
     trackers = {
-        '1m': GaussianTracker('1m', config.GAUSSIAN_LENGTH, config.GAUSSIAN_DISTANCE),
-        '3m': GaussianTracker('3m', config.GAUSSIAN_LENGTH, config.GAUSSIAN_DISTANCE),
-        '5m': GaussianTracker('5m', config.GAUSSIAN_LENGTH, config.GAUSSIAN_DISTANCE),
-        '15m': GaussianTracker('15m', config.GAUSSIAN_LENGTH, config.GAUSSIAN_DISTANCE),
+        '1m': GaussianTracker('1m', config.GAUSSIAN_LENGTH, config.GAUSSIAN_DISTANCE, config.GAUSSIAN_MODE),
+        '3m': GaussianTracker('3m', config.GAUSSIAN_LENGTH, config.GAUSSIAN_DISTANCE, config.GAUSSIAN_MODE),
+        '5m': GaussianTracker('5m', config.GAUSSIAN_LENGTH, config.GAUSSIAN_DISTANCE, config.GAUSSIAN_MODE),
+        '15m': GaussianTracker('15m', config.GAUSSIAN_LENGTH, config.GAUSSIAN_DISTANCE, config.GAUSSIAN_MODE),
     }
 
     # Track last candle time per TF to only act on NEW closed candles

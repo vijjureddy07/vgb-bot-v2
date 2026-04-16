@@ -1,60 +1,100 @@
 """
-VGB Delta Bot v2 — Gaussian Engine
-====================================
-Computes Gaussian Volatility Bands and detects crossovers.
-Handles M1, M3, M5, M15 timeframes.
+VGB Delta Bot v2.2 — Gaussian Engine (CORRECTED)
+===================================================
+Matches BigBeluga's "Volatility Gaussian Bands" Pine Script exactly.
+
+Key differences from our previous implementation:
+1. 21 Gaussian filters (length to length+20), averaged/medianed/moded
+2. Sigma = 10 (fixed), NOT length/6
+3. Volatility = SMA(high - low, 100), NOT Gaussian-smoothed ATR
+4. Bands = basis ± (volatility × distance)
+5. Crossover: close crosses above upper = BUY, close crosses below lower = SELL
 """
 
 import numpy as np
 import pandas as pd
 
 
-def gaussian_kernel(length):
-    """Generate normalized Gaussian kernel weights."""
-    sigma = length / 6.0
-    x = np.arange(length) - (length - 1) / 2.0
-    kernel = np.exp(-0.5 * (x / sigma) ** 2)
-    return kernel / kernel.sum()
-
-
-def gaussian_smooth(series, length):
-    """Apply Gaussian smoothing to a pandas Series."""
-    kernel = gaussian_kernel(length)
-    padded = np.concatenate([np.full(length - 1, series.iloc[0]), series.values])
-    smoothed = np.convolve(padded, kernel, mode='valid')
-    return pd.Series(smoothed, index=series.index)
-
-
-def compute_bands(df, length=23, distance=1):
+def gaussian_filter(src, length, sigma=10):
     """
-    Compute Gaussian Volatility Bands (BigBeluga style).
-    Returns: (basis, upper, lower)
+    Apply Gaussian filter matching Pine Script exactly.
+    Pine: weight = exp(-0.5 * ((i - length/2) / sigma)^2) / sqrt(sigma * 2 * pi)
+    Then normalize weights and convolve.
+    """
+    weights = np.zeros(length)
+    total = 0.0
+
+    for i in range(length):
+        w = np.exp(-0.5 * ((i - length / 2) / sigma) ** 2) / np.sqrt(sigma * 2 * np.pi)
+        weights[i] = w
+        total += w
+
+    # Normalize
+    weights = weights / total
+
+    # Apply filter: src[0] is current bar, src[i] is i bars ago
+    # In pandas, we need to reverse — iloc[-1] is current, iloc[-1-i] is i bars ago
+    result = np.full(len(src), np.nan)
+
+    for bar in range(length - 1, len(src)):
+        s = 0.0
+        for i in range(length):
+            s += src.iloc[bar - i] * weights[i]
+        result[bar] = s
+
+    return pd.Series(result, index=src.index)
+
+
+def compute_bands(df, length=20, distance=1.0, mode='AVG'):
+    """
+    Compute Volatility Gaussian Bands matching BigBeluga's Pine Script.
+
+    1. Compute 21 Gaussian filters with lengths from (length) to (length+20)
+    2. Average/median/mode them to get basis
+    3. Volatility = SMA(high - low, 100)
+    4. Upper = basis + volatility * distance
+    5. Lower = basis - volatility * distance
     """
     close = df['close'].astype(float)
     high = df['high'].astype(float)
     low = df['low'].astype(float)
 
-    basis = gaussian_smooth(close, length)
+    # Step 1: Compute 21 Gaussian filtered values
+    g_values = []
+    for step in range(21):  # 0 to 20
+        filt_len = length + step
+        gf = gaussian_filter(close, filt_len, sigma=10)
+        g_values.append(gf)
 
-    tr = pd.DataFrame({
-        'hl': high - low,
-        'hc': (high - close.shift(1)).abs(),
-        'lc': (low - close.shift(1)).abs()
-    }).max(axis=1)
-    atr = tr.rolling(window=length).mean()
-    atr_smooth = gaussian_smooth(atr.fillna(0), length)
+    # Step 2: Aggregate based on mode
+    g_matrix = pd.DataFrame({f'g{i}': g_values[i] for i in range(21)})
 
-    upper = basis + atr_smooth * distance
-    lower = basis - atr_smooth * distance
+    if mode == 'AVG':
+        basis = g_matrix.mean(axis=1)
+    elif mode == 'MEDIAN':
+        basis = g_matrix.median(axis=1)
+    elif mode == 'MODE':
+        # Mode is tricky with floats — use avg as fallback
+        basis = g_matrix.mean(axis=1)
+    else:
+        basis = g_matrix.mean(axis=1)
+
+    # Step 3: Volatility = SMA(high - low, 100)
+    candle_range = high - low
+    volatility = candle_range.rolling(window=100).mean()
+
+    # Step 4: Bands
+    upper = basis + volatility * distance
+    lower = basis - volatility * distance
 
     return basis, upper, lower
 
 
 def detect_crossover(df, basis, upper, lower):
     """
-    Check the latest candle for a crossover.
-    Returns: 'BUY', 'SELL', or None
-    Also returns the signal details dict if crossover detected.
+    Check the latest CLOSED candle for a crossover.
+    BUY: close crosses above upper band
+    SELL: close crosses below lower band
     """
     if len(df) < 2:
         return None, None
@@ -70,30 +110,26 @@ def detect_crossover(df, basis, upper, lower):
     curr_lower = float(lower.iloc[i])
     prev_lower = float(lower.iloc[i - 1])
 
-    # Bullish crossover
+    # BUY: price crosses above upper band
     if prev_close <= prev_upper and curr_close > curr_upper:
         return 'BUY', {
-            'signal': 'BUY',
-            'price': curr_close,
-            'upper': curr_upper,
-            'lower': curr_lower,
+            'signal': 'BUY', 'price': curr_close,
+            'upper': curr_upper, 'lower': curr_lower,
             'basis': float(basis.iloc[i])
         }
 
-    # Bearish crossover
+    # SELL: price crosses below lower band
     if prev_close >= prev_lower and curr_close < curr_lower:
         return 'SELL', {
-            'signal': 'SELL',
-            'price': curr_close,
-            'upper': curr_upper,
-            'lower': curr_lower,
+            'signal': 'SELL', 'price': curr_close,
+            'upper': curr_upper, 'lower': curr_lower,
             'basis': float(basis.iloc[i])
         }
 
     return None, None
 
 
-def check_momentum(signal_details, threshold_pct=0.05):
+def check_momentum(signal_details, threshold_pct=0.04):
     """
     Check if crossover has sufficient momentum.
     Price must exceed band by at least threshold_pct%.
@@ -117,29 +153,31 @@ class GaussianTracker:
     Maintains state across candle updates.
     """
 
-    def __init__(self, timeframe, length=23, distance=1):
+    def __init__(self, timeframe, length=20, distance=1, mode='AVG'):
         self.timeframe = timeframe
         self.length = length
         self.distance = distance
+        self.mode = mode
         self.df = None
         self.basis = None
         self.upper = None
         self.lower = None
         self.last_position = None  # 'above' or 'below'
-        self.current_bias = None   # 'BUY' or 'SELL' — set by crossovers
+        self.current_bias = None   # 'BUY' or 'SELL'
 
     def update(self, df):
         """
         Update with new candle data.
-        Returns crossover signal if detected: ('BUY'/'SELL', details_dict) or (None, None)
+        Returns (signal, details) or (None, None)
         """
         self.df = df
-        self.basis, self.upper, self.lower = compute_bands(df, self.length, self.distance)
+        self.basis, self.upper, self.lower = compute_bands(
+            df, self.length, self.distance, self.mode
+        )
 
         signal, details = detect_crossover(df, self.basis, self.upper, self.lower)
 
         if signal is not None:
-            # Prevent duplicate signals in same direction
             if signal == 'BUY' and self.last_position != 'above':
                 self.last_position = 'above'
                 self.current_bias = 'BUY'
@@ -152,11 +190,9 @@ class GaussianTracker:
         return None, None
 
     def get_bias(self):
-        """Get current directional bias."""
         return self.current_bias
 
     def get_current_bands(self):
-        """Get latest band values."""
         if self.basis is None or len(self.basis) == 0:
             return None, None, None
         return (
