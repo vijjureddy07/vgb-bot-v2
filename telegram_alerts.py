@@ -1,5 +1,8 @@
 """
-VGB Delta Bot v2.2 — Telegram Alerts (USD only)
+VGB Delta Bot v2.2 + v3 — Telegram Alerts (USD only)
+=====================================================
+Base: v2.2 (unchanged — all original alert formats preserved).
+Added at bottom: 4 new alerts needed by v3 main.py.
 """
 
 import requests
@@ -107,12 +110,63 @@ def alert_daily_summary(trades_today, pnl_today, capital, wins, losses):
 
 def alert_startup(capital):
     send_message(
-        f"🤖 <b>VGB Bot v2.2 Started</b>\n"
+        f"🤖 <b>VGB Bot v3.0 Started</b>\n"
         f"Capital: ${capital:,.2f}\n"
         f"Exchange: {'Testnet' if config.USE_TESTNET else 'LIVE'}\n"
-        f"Asia: {config.SESSIONS['ASIA']['htf_timeframe']}→{config.SESSIONS['ASIA']['entry_timeframe']} | "
-        f"London: {config.SESSIONS['LONDON']['htf_timeframe']} | "
-        f"NY: {config.SESSIONS['NY']['htf_timeframe']}\n"
-        f"Breakeven: {'ON at +' + str(config.BREAKEVEN_TRIGGER_PCT) + '%' if config.BREAKEVEN_ENABLED else 'OFF'}\n"
+        f"Strategy: NY only | M3 flip | OLD Gaussian\n"
+        f"Leverage: {config.DEFAULT_LEVERAGE}x | Alloc: {int(config.DEFAULT_CAPITAL_PCT*100)}%\n"
+        f"Breakeven: {'ON' if config.BREAKEVEN_ENABLED else 'OFF'} | "
+        f"Safety SL: {config.SAFETY_SL_PCT}%\n"
+        f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
+    )
+
+
+# ============================================================
+# V3 ADDITIONS — new alerts needed by v3 main.py
+# ============================================================
+
+def alert_session_end_summary(session_pnl, trades, capital, reason='scheduled end'):
+    """Sent at NY session close (1am Mon-Thu / 11:30pm Fri)."""
+    if not config.TELEGRAM_ENABLED:
+        return
+    emoji = "📈" if session_pnl >= 0 else "📉"
+    pnl_str = f"+${session_pnl:,.2f}" if session_pnl >= 0 else f"-${abs(session_pnl):,.2f}"
+    send_message(
+        f"⏹ <b>Session end — {reason}</b>\n"
+        f"Trades: {trades}\n"
+        f"Session PnL: {emoji} {pnl_str}\n"
+        f"Capital: ${capital:,.2f}\n"
+        f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
+    )
+
+
+def alert_warning(message):
+    """Generic warning (clock drift, failed SL placement, etc)."""
+    if not config.TELEGRAM_ENABLED:
+        return
+    send_message(
+        f"⚠️ <b>WARNING</b>\n{message}\n"
+        f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
+    )
+
+
+def alert_info(message):
+    """Generic info (session start banner, etc)."""
+    if not config.TELEGRAM_ENABLED:
+        return
+    send_message(
+        f"ℹ️ {message}\n"
+        f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
+    )
+
+
+def alert_balance_floor_breach(balance, floor):
+    """Auto-pause notice when mainnet balance drops below floor ($70)."""
+    if not config.TELEGRAM_ENABLED:
+        return
+    send_message(
+        f"🛑 <b>BALANCE FLOOR BREACHED</b>\n"
+        f"Balance: ${balance:,.2f} fell below floor ${floor:,.2f}\n"
+        f"Auto-pausing. Review before resuming.\n"
         f"Time: {datetime.now().strftime('%H:%M:%S')} IST"
     )

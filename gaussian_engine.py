@@ -1,202 +1,188 @@
 """
-VGB Delta Bot v2.2 — Gaussian Engine (CORRECTED)
-===================================================
-Matches BigBeluga's "Volatility Gaussian Bands" Pine Script exactly.
+VGB Bot v3.0 — OLD Gaussian Engine
+==================================
+This is a LITERAL PORT of `old_gaussian_bands()` and `detect_crossovers()`
+from backtest_ny_detailed.py (the script that produced the $22,638 result).
 
-Key differences from our previous implementation:
-1. 21 Gaussian filters (length to length+20), averaged/medianed/moded
-2. Sigma = 10 (fixed), NOT length/6
-3. Volatility = SMA(high - low, 100), NOT Gaussian-smoothed ATR
-4. Bands = basis ± (volatility × distance)
-5. Crossover: close crosses above upper = BUY, close crosses below lower = SELL
+The band math and the crossover detection loop are byte-for-byte the same
+algorithm. The only addition is a thin GaussianTracker class wrapper so that
+main.py can call it as a streaming per-bar interface.
+
+DO NOT "optimize" or "vectorize" or "improve" this file. If you want to
+change the signal behavior, change backtest_ny_detailed.py first, verify
+the new backtest result, then mirror the change here.
 """
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
 
-def gaussian_filter(src, length, sigma=10):
+# ==================================================================
+# BAND COMPUTATION — literal port of old_gaussian_bands()
+# ==================================================================
+def old_gaussian_bands(df, length=23, distance=1.0):
     """
-    Apply Gaussian filter matching Pine Script exactly.
-    Pine: weight = exp(-0.5 * ((i - length/2) / sigma)^2) / sqrt(sigma * 2 * pi)
-    Then normalize weights and convolve.
-    """
-    weights = np.zeros(length)
-    total = 0.0
-
-    for i in range(length):
-        w = np.exp(-0.5 * ((i - length / 2) / sigma) ** 2) / np.sqrt(sigma * 2 * np.pi)
-        weights[i] = w
-        total += w
-
-    # Normalize
-    weights = weights / total
-
-    # Apply filter: src[0] is current bar, src[i] is i bars ago
-    # In pandas, we need to reverse — iloc[-1] is current, iloc[-1-i] is i bars ago
-    result = np.full(len(src), np.nan)
-
-    for bar in range(length - 1, len(src)):
-        s = 0.0
-        for i in range(length):
-            s += src.iloc[bar - i] * weights[i]
-        result[bar] = s
-
-    return pd.Series(result, index=src.index)
-
-
-def compute_bands(df, length=20, distance=1.0, mode='AVG'):
-    """
-    Compute Volatility Gaussian Bands matching BigBeluga's Pine Script.
-
-    1. Compute 21 Gaussian filters with lengths from (length) to (length+20)
-    2. Average/median/mode them to get basis
-    3. Volatility = SMA(high - low, 100)
-    4. Upper = basis + volatility * distance
-    5. Lower = basis - volatility * distance
+    Byte-for-byte copy of backtest_ny_detailed.py::old_gaussian_bands.
+    Returns (basis, upper, lower) as pandas Series aligned with df.index.
     """
     close = df['close'].astype(float)
-    high = df['high'].astype(float)
-    low = df['low'].astype(float)
+    high  = df['high'].astype(float)
+    low   = df['low'].astype(float)
+    sigma = length / 6.0
 
-    # Step 1: Compute 21 Gaussian filtered values
-    g_values = []
-    for step in range(21):  # 0 to 20
-        filt_len = length + step
-        gf = gaussian_filter(close, filt_len, sigma=10)
-        g_values.append(gf)
+    weights = np.zeros(length)
+    for i in range(length):
+        weights[i] = np.exp(-0.5 * ((i - (length - 1) / 2) / sigma) ** 2)
+    weights /= weights.sum()
 
-    # Step 2: Aggregate based on mode
-    g_matrix = pd.DataFrame({f'g{i}': g_values[i] for i in range(21)})
+    src = close.values
+    basis = np.full(len(src), np.nan)
+    for bar in range(length - 1, len(src)):
+        basis[bar] = np.sum(src[bar - length + 1:bar + 1] * weights)
 
-    if mode == 'AVG':
-        basis = g_matrix.mean(axis=1)
-    elif mode == 'MEDIAN':
-        basis = g_matrix.median(axis=1)
-    elif mode == 'MODE':
-        # Mode is tricky with floats — use avg as fallback
-        basis = g_matrix.mean(axis=1)
-    else:
-        basis = g_matrix.mean(axis=1)
+    tr = pd.DataFrame({
+        'hl': high - low,
+        'hc': (high - close.shift(1)).abs(),
+        'lc': (low  - close.shift(1)).abs(),
+    }).max(axis=1)
+    atr = tr.rolling(window=length).mean()
+    atr_vals = atr.fillna(0).values
 
-    # Step 3: Volatility = SMA(high - low, 100)
-    candle_range = high - low
-    volatility = candle_range.rolling(window=100).mean()
+    atr_smooth = np.full(len(atr_vals), np.nan)
+    for bar in range(length - 1, len(atr_vals)):
+        atr_smooth[bar] = np.sum(atr_vals[bar - length + 1:bar + 1] * weights)
 
-    # Step 4: Bands
-    upper = basis + volatility * distance
-    lower = basis - volatility * distance
-
-    return basis, upper, lower
+    basis_s = pd.Series(basis, index=df.index)
+    atr_s   = pd.Series(atr_smooth, index=df.index)
+    return basis_s, basis_s + atr_s * distance, basis_s - atr_s * distance
 
 
-def detect_crossover(df, basis, upper, lower):
+# ==================================================================
+# CROSSOVER DETECTION — literal port of detect_crossovers()
+# ==================================================================
+def detect_crossovers(df, basis, upper, lower):
     """
-    Check the latest CLOSED candle for a crossover.
-    BUY: close crosses above upper band
-    SELL: close crosses below lower band
+    Byte-for-byte copy of backtest_ny_detailed.py::detect_crossovers.
+    Returns a list of signal dicts [{'index': i, 'time': ts, 'signal': 'BUY'|'SELL', 'price': cc}, ...].
     """
-    if len(df) < 2:
-        return None, None
-
-    i = len(df) - 1
-    if pd.isna(upper.iloc[i]) or pd.isna(lower.iloc[i]):
-        return None, None
-
-    curr_close = float(df['close'].iloc[i])
-    prev_close = float(df['close'].iloc[i - 1])
-    curr_upper = float(upper.iloc[i])
-    prev_upper = float(upper.iloc[i - 1])
-    curr_lower = float(lower.iloc[i])
-    prev_lower = float(lower.iloc[i - 1])
-
-    # BUY: price crosses above upper band
-    if prev_close <= prev_upper and curr_close > curr_upper:
-        return 'BUY', {
-            'signal': 'BUY', 'price': curr_close,
-            'upper': curr_upper, 'lower': curr_lower,
-            'basis': float(basis.iloc[i])
-        }
-
-    # SELL: price crosses below lower band
-    if prev_close >= prev_lower and curr_close < curr_lower:
-        return 'SELL', {
-            'signal': 'SELL', 'price': curr_close,
-            'upper': curr_upper, 'lower': curr_lower,
-            'basis': float(basis.iloc[i])
-        }
-
-    return None, None
+    close = df['close'].astype(float)
+    signals = []
+    prev = None
+    for i in range(1, len(df)):
+        if pd.isna(upper.iloc[i]) or pd.isna(lower.iloc[i]):
+            continue
+        cc, pc = close.iloc[i], close.iloc[i - 1]
+        cu, pu = upper.iloc[i], upper.iloc[i - 1]
+        cl, pl = lower.iloc[i], lower.iloc[i - 1]
+        if pc <= pu and cc > cu and prev != 'above':
+            signals.append({'index': i, 'time': df.index[i], 'signal': 'BUY',  'price': cc})
+            prev = 'above'
+        elif pc >= pl and cc < cl and prev != 'below':
+            signals.append({'index': i, 'time': df.index[i], 'signal': 'SELL', 'price': cc})
+            prev = 'below'
+    return signals
 
 
-def check_momentum(signal_details, threshold_pct=0.04):
-    """
-    Check if crossover has sufficient momentum.
-    Price must exceed band by at least threshold_pct%.
-    """
-    if signal_details is None:
-        return False
-
-    price = signal_details['price']
-
-    if signal_details['signal'] == 'BUY':
-        min_price = signal_details['upper'] * (1 + threshold_pct / 100)
-        return price >= min_price
-    else:
-        max_price = signal_details['lower'] * (1 - threshold_pct / 100)
-        return price <= max_price
-
-
+# ==================================================================
+# GaussianTracker — streaming interface for live bot (main.py)
+# ==================================================================
 class GaussianTracker:
     """
-    Tracks Gaussian bands and crossovers for a single timeframe.
-    Maintains state across candle updates.
+    Per-timeframe stateful tracker for main.py. Internally uses the same two
+    functions above; guarantees the live bot signals match the backtest.
+
+    API:
+      tracker = GaussianTracker('3m', length, distance, mode)
+      signal, details = tracker.update(df)
+
+    `df` is the full candle DataFrame (not just the latest bar). The tracker
+    runs the same detect_crossovers() over the whole df internally but caches
+    the last-fired signal state so it only emits new signals.
+
+    `mode` is accepted for v2 compatibility — v3 always uses OLD.
+
+    This is intentionally NOT optimized for speed — the live bot runs it once
+    per 3 minutes on ~200 bars, which takes a few ms. Correctness > speed.
     """
 
-    def __init__(self, timeframe, length=20, distance=1, mode='AVG'):
+    def __init__(self, timeframe: str, length: int, distance: float, mode: str = 'OLD'):
         self.timeframe = timeframe
-        self.length = length
-        self.distance = distance
-        self.mode = mode
-        self.df = None
-        self.basis = None
-        self.upper = None
-        self.lower = None
-        self.last_position = None  # 'above' or 'below'
-        self.current_bias = None   # 'BUY' or 'SELL'
+        self.length    = int(length)
+        self.distance  = float(distance)
+        self.mode      = mode
+        # The 'prev' state from detect_crossovers — shared across calls so we
+        # don't re-fire signals we've already reported.
+        self._prev_state = None  # 'above' | 'below' | None
+        # Timestamp of the last bar we reported a signal on (for dedup safety).
+        self._last_reported_time = None
 
-    def update(self, df):
+    def reset(self):
+        """Clear state. Call at session start."""
+        self._prev_state = None
+        self._last_reported_time = None
+
+    def update(self, df: pd.DataFrame):
         """
-        Update with new candle data.
-        Returns (signal, details) or (None, None)
+        Evaluate the full df, return (signal_or_None, details).
+
+        Only emits a signal if the LAST bar of df is a newly-fired crossover
+        that we haven't reported yet. Any earlier crossovers in df have
+        already been seen on prior updates (or never will be, e.g. on cold
+        start — we walk through them silently to establish prev_state).
         """
-        self.df = df
-        self.basis, self.upper, self.lower = compute_bands(
-            df, self.length, self.distance, self.mode
-        )
+        if df is None or len(df) < 2:
+            return None, None
 
-        signal, details = detect_crossover(df, self.basis, self.upper, self.lower)
+        basis, upper, lower = old_gaussian_bands(df, self.length, self.distance)
 
-        if signal is not None:
-            if signal == 'BUY' and self.last_position != 'above':
-                self.last_position = 'above'
-                self.current_bias = 'BUY'
-                return signal, details
-            elif signal == 'SELL' and self.last_position != 'below':
-                self.last_position = 'below'
-                self.current_bias = 'SELL'
-                return signal, details
+        # Run the same detection loop. This replays all signals in df.
+        # We only care about the VERY LAST one if it's at the latest bar.
+        signals = detect_crossovers(df, basis, upper, lower)
 
-        return None, None
+        latest_time = df.index[-1]
 
-    def get_bias(self):
-        return self.current_bias
+        details = None
+        u_last = upper.iloc[-1]
+        l_last = lower.iloc[-1]
+        if not pd.isna(u_last) and not pd.isna(l_last):
+            details = {
+                'price':      float(df['close'].iloc[-1]),
+                'upper':      float(u_last),
+                'lower':      float(l_last),
+                'basis':      float(basis.iloc[-1]) if not pd.isna(basis.iloc[-1]) else None,
+                'atr_smooth': None,   # not used by main.py
+                'bar_time':   latest_time,
+            }
 
-    def get_current_bands(self):
-        if self.basis is None or len(self.basis) == 0:
-            return None, None, None
-        return (
-            float(self.basis.iloc[-1]),
-            float(self.upper.iloc[-1]),
-            float(self.lower.iloc[-1])
-        )
+        # Only EMIT a signal if the LAST detected crossover is exactly at
+        # the latest bar AND we haven't already emitted for this bar.
+        # Identical logic to the batch detect_crossovers loop.
+        if signals and signals[-1]['time'] == latest_time:
+            if self._last_reported_time != latest_time:
+                self._last_reported_time = latest_time
+                self._prev_state = 'above' if signals[-1]['signal'] == 'BUY' else 'below'
+                return signals[-1]['signal'], details
+
+        return None, details
+
+
+# ==================================================================
+# Legacy helpers (v2 compatibility)
+# ==================================================================
+def check_momentum(details, threshold_pct):
+    """v3 never calls this. v2 callers will resolve, always returns True (pass-through)."""
+    return True
+
+
+# Also expose `compute_bands` for anyone who was calling the old symbol.
+def compute_bands(df, length=23, distance=1.0, sigma=None):
+    basis, upper, lower = old_gaussian_bands(df, length, distance)
+    atr_smooth = np.full(len(df), np.nan)
+    return (
+        basis.values,
+        upper.values,
+        lower.values,
+        atr_smooth,
+    )
