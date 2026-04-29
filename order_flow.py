@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-ORDER FLOW ENGINE — Stage 1 v2 (two separate single-stream connections)
-========================================================================
-Connects to Binance USDS-M Futures MAINNET via TWO separate WebSockets:
-  - /ws/btcusdt@depth20@100ms  (top 20 partial book snapshots, every 100ms)
-  - /ws/btcusdt@aggTrade        (every executed trade with aggressor side)
+ORDER FLOW ENGINE — Stage 1 v3 (depth via WS, trades via REST polling)
+=======================================================================
+Hybrid approach after WS aggTrade stream proved unreliable from both
+local and GCP IPs:
 
-Single-stream endpoints send the data object directly (no {stream, data} wrapper),
-which is more reliable than the combined-stream multiplexer.
+  - Depth:  WebSocket  wss://fstream.binance.com/ws/btcusdt@depth20@100ms
+  - Trades: REST poll  https://fapi.binance.com/fapi/v1/aggTrades
+
+Trades are pulled every 2 seconds via REST. We track the last seen trade
+ID to avoid duplicates. Lag is 2-3 seconds — acceptable since the bot
+acts on M3 bar closes (3-min cadence), not tick-by-tick.
 
 Public market data — no API key needed. Zero risk.
 """
@@ -18,46 +21,59 @@ import time
 from collections import deque
 from datetime import datetime
 from threading import Thread, Lock
+import requests
 import websockets
 
-# Two separate single-stream endpoints
 WS_DEPTH = "wss://fstream.binance.com/ws/btcusdt@depth20@100ms"
-WS_TRADE = "wss://fstream.binance.com/ws/btcusdt@aggTrade"
+REST_TRADES = "https://fapi.binance.com/fapi/v1/aggTrades"
+SYMBOL = "BTCUSDT"
 
 TOP_N_LEVELS = 5
-DELTA_WINDOW_SECONDS = 300
-TREND_RECENT_SECONDS = 60
-RECONNECT_DELAY = 3
+DELTA_WINDOW_SECONDS = 300   # 5 minutes
+TREND_RECENT_SECONDS = 60    # last 1 min vs prior 4 min for trend
+WS_RECONNECT_DELAY = 3
+TRADE_POLL_INTERVAL = 2.0    # seconds between REST polls
+TRADE_POLL_LIMIT = 1000      # max trades per poll (Binance allows 1000)
 
 
 class OrderFlowEngine:
-    """Real-time order flow state from Binance Futures public streams."""
+    """Real-time order flow state — depth via WS, trades via REST polling."""
 
     def __init__(self):
+        # Order book state
         self._bids = []
         self._asks = []
         self._book_lock = Lock()
         self._last_book_update = 0.0
 
+        # Trade tape state
         self._trades = deque()
         self._trade_lock = Lock()
         self._last_trade_time = 0.0
+        self._last_trade_id = 0  # for REST pagination
 
+        # Diagnostics
         self._msg_depth = 0
         self._msg_trade = 0
-        self._msg_depth_bad = 0
-        self._msg_trade_bad = 0
+        self._poll_count = 0
+        self._poll_errors = 0
 
         self._running = False
-        self._thread = None
+        self._ws_thread = None
+        self._poll_thread = None
         self._loop = None
 
+    # =====================================================================
+    # Lifecycle
+    # =====================================================================
     def start(self):
         if self._running:
             return
         self._running = True
-        self._thread = Thread(target=self._run_loop, daemon=True, name="OrderFlow")
-        self._thread.start()
+        self._ws_thread = Thread(target=self._run_ws_loop, daemon=True, name="OrderFlowWS")
+        self._poll_thread = Thread(target=self._run_poll_loop, daemon=True, name="OrderFlowPoll")
+        self._ws_thread.start()
+        self._poll_thread.start()
 
     def stop(self):
         self._running = False
@@ -66,34 +82,33 @@ class OrderFlowEngine:
                 self._loop.call_soon_threadsafe(self._loop.stop)
             except Exception:
                 pass
-        if self._thread:
-            self._thread.join(timeout=5)
+        if self._ws_thread:
+            self._ws_thread.join(timeout=5)
+        if self._poll_thread:
+            self._poll_thread.join(timeout=5)
 
-    def _run_loop(self):
+    # =====================================================================
+    # WebSocket: depth stream
+    # =====================================================================
+    def _run_ws_loop(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._main_loop())
+            self._loop.run_until_complete(self._depth_consumer())
         except Exception as e:
             if self._running:
-                print(f"[FLOW] Loop ended unexpectedly: {e}")
+                print(f"[FLOW] depth loop ended: {e}")
         finally:
             try:
                 self._loop.close()
             except Exception:
                 pass
 
-    async def _main_loop(self):
-        await asyncio.gather(
-            self._stream_consumer(WS_DEPTH, self._on_depth_msg, "depth"),
-            self._stream_consumer(WS_TRADE, self._on_trade_msg, "trade"),
-        )
-
-    async def _stream_consumer(self, url, handler, label):
+    async def _depth_consumer(self):
         while self._running:
             try:
-                async with websockets.connect(url, ping_interval=20, ping_timeout=15) as ws:
-                    print(f"[FLOW] {label} stream connected")
+                async with websockets.connect(WS_DEPTH, ping_interval=20, ping_timeout=15) as ws:
+                    print(f"[FLOW] depth WS connected")
                     async for msg in ws:
                         if not self._running:
                             return
@@ -101,29 +116,27 @@ class OrderFlowEngine:
                             data = json.loads(msg)
                         except Exception:
                             continue
-                        handler(data)
+                        self._on_depth(data)
             except asyncio.CancelledError:
                 return
             except Exception as e:
                 if self._running:
-                    print(f"[FLOW] {label} stream error: {e} — reconnecting in {RECONNECT_DELAY}s")
-                    await asyncio.sleep(RECONNECT_DELAY)
+                    print(f"[FLOW] depth WS error: {e} — reconnecting in {WS_RECONNECT_DELAY}s")
+                    await asyncio.sleep(WS_RECONNECT_DELAY)
                 else:
                     return
 
-    def _on_depth_msg(self, data):
+    def _on_depth(self, data):
         if self._msg_depth == 0:
             print(f"[FLOW] first depth msg keys: {list(data.keys())[:10]}")
         bids = data.get('b') or data.get('bids')
         asks = data.get('a') or data.get('asks')
         if not bids or not asks:
-            self._msg_depth_bad += 1
             return
         try:
             new_bids = [[float(p), float(q)] for p, q in bids[:TOP_N_LEVELS]]
             new_asks = [[float(p), float(q)] for p, q in asks[:TOP_N_LEVELS]]
         except Exception:
-            self._msg_depth_bad += 1
             return
         with self._book_lock:
             self._bids = new_bids
@@ -131,16 +144,64 @@ class OrderFlowEngine:
             self._last_book_update = time.time()
         self._msg_depth += 1
 
-    def _on_trade_msg(self, data):
-        if self._msg_trade == 0:
-            print(f"[FLOW] first trade msg: {data}")
+    # =====================================================================
+    # REST polling: trades
+    # =====================================================================
+    def _run_poll_loop(self):
+        """Poll /fapi/v1/aggTrades every TRADE_POLL_INTERVAL seconds."""
+        # First poll: just get latest trade ID to anchor (don't import history)
         try:
-            qty = float(data.get('q', 0))
-            is_buyer_maker = bool(data.get('m', False))
-            ts = data.get('T', 0) / 1000.0
+            r = requests.get(REST_TRADES,
+                             params={'symbol': SYMBOL, 'limit': 1},
+                             timeout=5)
+            data = r.json()
+            if isinstance(data, list) and data:
+                self._last_trade_id = int(data[-1]['a'])
+                print(f"[FLOW] trade poll initialized at trade_id={self._last_trade_id}")
+        except Exception as e:
+            print(f"[FLOW] trade poll init failed: {e}")
+
+        while self._running:
+            start = time.time()
+            try:
+                params = {'symbol': SYMBOL, 'limit': TRADE_POLL_LIMIT}
+                if self._last_trade_id:
+                    params['fromId'] = self._last_trade_id + 1
+                r = requests.get(REST_TRADES, params=params, timeout=5)
+                self._poll_count += 1
+                if r.status_code == 200:
+                    trades = r.json()
+                    if isinstance(trades, list) and trades:
+                        if self._msg_trade == 0:
+                            print(f"[FLOW] first trade batch: {len(trades)} trades, "
+                                  f"sample={trades[-1]}")
+                        for t in trades:
+                            self._on_trade(t)
+                        self._last_trade_id = int(trades[-1]['a'])
+                else:
+                    self._poll_errors += 1
+                    if self._poll_errors <= 3:
+                        print(f"[FLOW] trade poll HTTP {r.status_code}: {r.text[:200]}")
+            except Exception as e:
+                self._poll_errors += 1
+                if self._poll_errors <= 3:
+                    print(f"[FLOW] trade poll error: {e}")
+
+            # Sleep until next poll, accounting for elapsed time
+            elapsed = time.time() - start
+            sleep_for = max(0.1, TRADE_POLL_INTERVAL - elapsed)
+            if not self._running:
+                return
+            time.sleep(sleep_for)
+
+    def _on_trade(self, t):
+        try:
+            qty = float(t.get('q', 0))
+            is_buyer_maker = bool(t.get('m', False))
+            ts = t.get('T', 0) / 1000.0
         except Exception:
-            self._msg_trade_bad += 1
             return
+        # m=True -> buyer is maker -> aggressor was SELLER -> negative
         signed = -qty if is_buyer_maker else qty
         with self._trade_lock:
             self._trades.append((ts, signed))
@@ -150,6 +211,9 @@ class OrderFlowEngine:
                 self._trades.popleft()
         self._msg_trade += 1
 
+    # =====================================================================
+    # Computed metrics
+    # =====================================================================
     def _imbalance(self):
         with self._book_lock:
             bid_sum = sum(q for _, q in self._bids)
@@ -193,16 +257,19 @@ class OrderFlowEngine:
             'top_ask':         self._asks[0][0] if self._asks else None,
             'msg_depth':       self._msg_depth,
             'msg_trade':       self._msg_trade,
+            'poll_count':      self._poll_count,
+            'poll_errors':     self._poll_errors,
         }
 
 
+# ============================================================
 def main():
-    print("=" * 70)
-    print("ORDER FLOW ENGINE — Stage 1 v2 (separate streams)")
-    print(f"Depth: {WS_DEPTH}")
-    print(f"Trade: {WS_TRADE}")
+    print("=" * 75)
+    print("ORDER FLOW ENGINE — Stage 1 v3 (WS depth + REST trade polling)")
+    print(f"Depth WS:    {WS_DEPTH}")
+    print(f"Trade REST:  {REST_TRADES} (poll every {TRADE_POLL_INTERVAL}s)")
     print(f"Duration: 2 minutes")
-    print("=" * 70)
+    print("=" * 75)
 
     engine = OrderFlowEngine()
     engine.start()
@@ -235,21 +302,23 @@ def main():
             print(f"[{ts}] imb={imb_s}  d5m={d5m_s}BTC ({trend})  "
                   f"trades_5m={trades}  spread={spread_s}  "
                   f"book/trade_age={book_s}/{trade_s}  "
-                  f"depth_msgs={snap['msg_depth']} trade_msgs={snap['msg_trade']}")
+                  f"depth={snap['msg_depth']} trades={snap['msg_trade']} "
+                  f"polls={snap['poll_count']}/err={snap['poll_errors']}")
             last_print = time.time()
         time.sleep(0.5)
 
     engine.stop()
     time.sleep(0.5)
-    print("\n" + "=" * 70)
-    print("Stage 1 v2 complete.")
+    print("\n" + "=" * 75)
+    print("Stage 1 v3 complete.")
     print("Sanity expectations:")
     print("  - imbalance: typically 0.3 to 3.0 on BTCUSDT")
     print("  - delta5m: a few BTC +/- during normal flow")
     print("  - book_age: under 1 second")
-    print("  - trade_age: under a few seconds during active trading")
-    print("  - trade_msgs should grow rapidly (100s/min normally)")
-    print("=" * 70)
+    print("  - trade_age: under 3 seconds (we poll every 2s)")
+    print("  - trades counter should grow rapidly")
+    print("  - poll_errors should be 0 (or very low)")
+    print("=" * 75)
 
 
 if __name__ == '__main__':
