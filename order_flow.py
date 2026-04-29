@@ -263,6 +263,107 @@ class OrderFlowEngine:
 
 
 # ============================================================
+# OrderFlowFilter — scoring + decision for crossover signals
+# ============================================================
+# Scoring (delta-only, tight rules):
+#   +1 if delta sign matches signal direction
+#   +1 if delta trend matches signal direction (NOT 'flat')
+# Score: 0, 1, or 2
+#
+# Observation mode: bot takes ALL signals regardless of score.
+# Filter decision is logged for post-hoc analysis.
+# ============================================================
+
+MIN_TRADES_FOR_FILTER = 50  # need at least this many trades in window to score
+
+def score_signal(signal_side: str, snapshot: dict) -> dict:
+    """
+    Score a crossover signal against current order flow state.
+    Returns dict with: score (0-2), decision (str), reason (str), ready (bool).
+    """
+    side = signal_side.upper()
+    delta = snapshot.get('delta_5m')
+    trend = snapshot.get('delta_trend')
+    n_trades = snapshot.get('trade_count_5m', 0)
+
+    # Filter not ready yet (just started up)
+    if n_trades < MIN_TRADES_FOR_FILTER or delta is None:
+        return {
+            'score':    None,
+            'decision': 'NOT_READY',
+            'reason':   f'only {n_trades} trades in window',
+            'ready':    False,
+        }
+
+    score = 0
+    reasons = []
+
+    # Component 1: delta sign matches
+    if side == 'BUY' and delta > 0:
+        score += 1
+        reasons.append('delta+')
+    elif side == 'SELL' and delta < 0:
+        score += 1
+        reasons.append('delta-')
+    else:
+        reasons.append('delta_against')
+
+    # Component 2: trend matches (TIGHT — flat does not count)
+    if side == 'BUY' and trend == 'rising':
+        score += 1
+        reasons.append('trend_rising')
+    elif side == 'SELL' and trend == 'falling':
+        score += 1
+        reasons.append('trend_falling')
+    else:
+        reasons.append(f'trend_{trend}')
+
+    # Decision mapping
+    if score == 2:
+        decision = 'TAKE_FULL'
+    elif score == 1:
+        decision = 'TAKE_WEAK'
+    else:
+        decision = 'WOULD_BLOCK'
+
+    return {
+        'score':    score,
+        'decision': decision,
+        'reason':   '|'.join(reasons),
+        'ready':    True,
+    }
+
+
+def log_flow_decision(csv_path: str, timestamp_str: str, signal_side: str,
+                      signal_price: float, snapshot: dict, score_result: dict,
+                      actual_action: str = 'TAKE'):
+    """
+    Append one row to flow_log.csv. Creates header if file doesn't exist.
+    """
+    import os, csv
+    file_exists = os.path.isfile(csv_path)
+    with open(csv_path, 'a', newline='') as f:
+        w = csv.writer(f)
+        if not file_exists:
+            w.writerow([
+                'timestamp', 'signal_side', 'signal_price',
+                'imbalance', 'delta_5m', 'delta_trend', 'trade_count_5m',
+                'score', 'filter_decision', 'reason', 'actual_action',
+            ])
+        w.writerow([
+            timestamp_str, signal_side, f"{signal_price:.2f}",
+            f"{snapshot.get('imbalance'):.3f}" if snapshot.get('imbalance') is not None else '',
+            f"{snapshot.get('delta_5m'):.4f}" if snapshot.get('delta_5m') is not None else '',
+            snapshot.get('delta_trend', ''),
+            snapshot.get('trade_count_5m', 0),
+            score_result.get('score', ''),
+            score_result.get('decision', ''),
+            score_result.get('reason', ''),
+            actual_action,
+        ])
+
+
+# ============================================================
 def main():
     print("=" * 75)
     print("ORDER FLOW ENGINE — Stage 1 v3 (WS depth + REST trade polling)")
